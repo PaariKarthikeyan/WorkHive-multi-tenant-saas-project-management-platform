@@ -238,231 +238,58 @@ router.post('/reset-password', async (req, res) => {
 
 // ─── POST /api/auth/verify-2fa ────────────────────────────────
 // Called after login if user has 2FA enabled — verify OTP
+// ✅ Full verify-2fa route — clean version
 router.post('/verify-2fa', async (req, res) => {
   const { user_id, otp } = req.body;
+
+  if (!user_id || !otp)
+    return res.status(400).json({ success: false, error: 'user_id and otp are required.' });
+
   try {
     const [[user]] = await db.query(
-      `SELECT user_id, reset_token, reset_token_expiry, tenant_id,
-              CONCAT(first_name,' ',last_name) AS name, email,
+      `SELECT u.user_id, u.reset_token, u.reset_token_expiry, u.tenant_id,
+              CONCAT(u.first_name,' ',u.last_name) AS name, u.email,
               r.name AS role, t.name AS org_name, t.plan
        FROM users u
        JOIN roles r ON u.role_id = r.role_id
        JOIN tenants t ON u.tenant_id = t.tenant_id
-       WHERE u.user_id=? AND reset_token=? AND reset_token_expiry > NOW()`,
+       WHERE u.user_id=? AND u.reset_token=? AND u.reset_token_expiry > NOW()`,
       [user_id, otp]
     );
 
-    if (!user) {
-      return res.status(400).json({ success: false, error: 'Invalid or expired 2FA code.' });
-    }
+    if (!user)
+      return res.status(401).json({ success: false, error: 'Invalid or expired verification code.' });
 
-    // Clear the OTP
-    await db.query('UPDATE users SET reset_token=NULL, reset_token_expiry=NULL WHERE user_id=?', [user_id]);
+    // Clear the OTP after successful use
+    await db.query(
+      'UPDATE users SET reset_token=NULL, reset_token_expiry=NULL WHERE user_id=?',
+      [user.user_id]
+    );
 
+    // Issue JWT — user is now fully authenticated
     const token = jwt.sign(
       { user_id: user.user_id, tenant_id: user.tenant_id, role: user.role, email: user.email },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
 
-    res.json({
-      success: true,
-      message: '2FA verified.',
-      data: { token, user: { user_id: user.user_id, name: user.name, email: user.email, role: user.role, org_name: user.org_name, plan: user.plan } }
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, error: '2FA verification failed.' });
-  }
-
-  // Split full name into first + last
-  const nameParts = admin_name.trim().split(' ');
-  const first_name = nameParts[0] || admin_name;
-  const last_name = nameParts.slice(1).join(' ') || '';
-
-  const conn = await db.getConnection();
-  try {
-    await conn.beginTransaction();
-
-    // 1. Check if email already registered
-    const [existing] = await conn.query(
-      'SELECT user_id FROM users WHERE email = ?',
-      [admin_email]
-    );
-    if (existing.length > 0) {
-      await conn.rollback();
-      return res.status(409).json({ success: false, error: 'Email already registered.' });
-    }
-
-    // 2. Create tenant
-    const [tenantResult] = await conn.query(
-      'INSERT INTO tenants (name, plan) VALUES (?, ?)',
-      [org_name, plan || 'free']
-    );
-    const tenant_id = tenantResult.insertId;
-
-    // 3. Hash password (12 rounds)
-    const password_hash = await bcrypt.hash(admin_password, 12);
-
-    // 4. Insert admin user (role_id = 1 → 'admin' from roles table)
-    const [userResult] = await conn.query(
-      `INSERT INTO users (tenant_id, role_id, first_name, last_name, email, password_hash, is_active)
-       VALUES (?, 1, ?, ?, ?, ?, 1)`,
-      [tenant_id, first_name, last_name, admin_email, password_hash]
-    );
-
-    // 5. Initialize analytics_summary for this tenant
-    await conn.query(
-      `INSERT INTO analytics_summary
-         (tenant_id, total_projects, active_projects, total_tasks,
-          completed_tasks, pending_tasks, inprogress_tasks, total_teams, total_employees)
-       VALUES (?, 0, 0, 0, 0, 0, 0, 0, 0)`,
-      [tenant_id]
-    );
-
-    await conn.commit();
-
-    res.status(201).json({
-      success: true,
-      message: 'Organisation registered successfully.',
-      data: {
-        tenant_id,
-        user_id: userResult.insertId,
-        role: 'admin',
-      },
-    });
-
-  } catch (err) {
-    await conn.rollback();
-    console.error('Register error:', err);
-    res.status(500).json({ success: false, error: 'Registration failed. Please try again.' });
-  } finally {
-    conn.release();
-  }
-});
-
-
-// ─── POST /api/auth/login ─────────────────────────────────────────────────────
-// Body: { email, password }
-router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({ success: false, error: 'Email and password are required.' });
-  }
-
-  try {
-    // JOIN roles table to get role name since users stores role_id FK
-    const [rows] = await db.query(
-      `SELECT
-         u.user_id,
-         u.tenant_id,
-         CONCAT(u.first_name, ' ', u.last_name) AS name,
-         u.email,
-         u.password_hash,
-         u.is_active,
-         r.name  AS role,
-         t.name  AS org_name,
-         t.plan
-       FROM users u
-       JOIN tenants t ON u.tenant_id = t.tenant_id
-       JOIN roles   r ON u.role_id   = r.role_id
-       WHERE u.email = ?`,
-      [email]
-    );
-
-    // 1. User not found
-    if (rows.length === 0) {
-      return res.status(401).json({ success: false, error: 'Invalid email or password.' });
-    }
-
-    const user = rows[0];
-
-    // 2. Account deactivated
-    if (!user.is_active) {
-      return res.status(403).json({
-        success: false,
-        error: 'Your account has been deactivated. Please contact your admin.',
+    // Optional: send login alert email — wrapped in try/catch so it never crashes the route
+    try {
+      await transporter.sendMail({
+        from: `"ProjexPM Security" <${process.env.EMAIL_USER}>`,
+        to: user.email,
+        subject: `New login detected — ProjexPM`,
+        html: `<p>Hi ${user.name}, a new login to your account was verified successfully.</p>`
       });
+    } catch (emailErr) {
+      console.warn('Login alert email failed (non-fatal):', emailErr.message);
+      // Do NOT re-throw — email failure should not block login
     }
 
-    // 3. Check password
-    const isMatch = await bcrypt.compare(password, user.password_hash);
-
-    if (!isMatch) {
-      // Send security alert email (non-blocking — failure is logged but doesn't break login)
-      try {
-        if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-          await transporter.sendMail({
-            from: process.env.EMAIL_USER,
-            to: email,
-            subject: '⚠️ Failed Login Attempt — ProjexPM',
-            html: `
-              <p>A failed login attempt was detected on your ProjexPM account.</p>
-              <p><strong>Time:</strong> ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST</p>
-              <p>If this was not you, please reset your password immediately.</p>
-            `,
-          });
-        }
-      } catch (mailErr) {
-        console.warn('Security alert email failed (non-critical):', mailErr.message);
-      }
-
-      return res.status(401).json({ success: false, error: 'Invalid email or password.' });
-    }
-
-    // Inside POST /api/auth/login — after bcrypt.compare succeeds, before signing JWT:
-
-    if (user.two_factor_enabled) {
-      // Generate OTP and send to secondary email
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
-
-      await db.query(
-        'UPDATE users SET reset_token=?, reset_token_expiry=? WHERE user_id=?',
-        [otp, expiry, user.user_id]
-      );
-
-      try {
-        if (user.secondary_email) {
-          await transporter.sendMail({
-            from: process.env.EMAIL_USER,
-            to: user.secondary_email,
-            subject: '🔐 Your 2FA Login Code — ProjexPM',
-            html: `<h2>Two-Factor Authentication</h2>
-               <p>Your login verification code is:</p>
-               <h1 style="letter-spacing:8px;color:#01696f;font-size:48px">${otp}</h1>
-               <p>Expires in <strong>10 minutes</strong>.</p>`
-          });
-        }
-      } catch (e) { console.warn('2FA email failed:', e.message); }
-
-      return res.json({
-        success: true,
-        requires_2fa: true,
-        user_id: user.user_id,
-        message: 'A 2FA verification code has been sent to your secondary email.'
-      });
-    }
-    // If 2FA not enabled, continue to sign JWT normally...
-
-
-    // 4. Sign JWT — role comes from the roles table join
-    const token = jwt.sign(
-      {
-        user_id: user.user_id,
-        tenant_id: user.tenant_id,
-        role: user.role,    // 'admin' | 'manager' | 'employee'
-        email: user.email,
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
-    );
-
-    // 5. Return success
-    res.status(200).json({
+    // ✅ Send response ONCE, at the very end
+    return res.json({
       success: true,
-      message: `Welcome back, ${user.name}!`,
+      message: 'Login successful.',
       data: {
         token,
         user: {
@@ -471,9 +298,121 @@ router.post('/login', async (req, res) => {
           email: user.email,
           role: user.role,
           org_name: user.org_name,
-          plan: user.plan,
-        },
-      },
+          plan: user.plan
+        }
+      }
+    });
+
+  } catch (err) {
+    console.error('verify-2fa error:', err);
+    return res.status(500).json({ success: false, error: 'Verification failed. Please try again.' });
+  }
+});
+
+
+// ─── POST /api/auth/login ─────────────────────────────────────────────────────
+// Body: { email, password }
+// POST /api/auth/login
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password)
+    return res.status(400).json({ success: false, error: 'Email and password are required.' });
+
+  try {
+    const [[user]] = await db.query(
+      `SELECT u.user_id, u.email, u.password_hash, u.two_factor_enabled,
+              u.secondary_email, u.phone, u.is_active, u.tenant_id,
+              CONCAT(u.first_name,' ',u.last_name) AS name,
+              r.name AS role, t.name AS org_name, t.plan
+       FROM users u
+       JOIN roles r ON u.role_id = r.role_id
+       JOIN tenants t ON u.tenant_id = t.tenant_id
+       WHERE u.email = ?`,
+      [email]
+    );
+
+    if (!user)
+      return res.status(401).json({ success: false, error: 'Invalid email or password.' });
+
+    if (!user.is_active)
+      return res.status(403).json({ success: false, error: 'Your account has been deactivated.' });
+
+    const passwordMatch = await bcrypt.compare(password, user.password_hash);
+    if (!passwordMatch)
+      return res.status(401).json({ success: false, error: 'Invalid email or password.' });
+
+    // ── 2FA CHECK ──────────────────────────────────────────────
+    if (user.two_factor_enabled) {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+      await db.query(
+        'UPDATE users SET reset_token=?, reset_token_expiry=? WHERE user_id=?',
+        [otp, expiry, user.user_id]
+      );
+
+      // Send OTP to secondary email
+      if (user.secondary_email) {
+        try {
+          await transporter.sendMail({
+            from: `"ProjexPM Security" <${process.env.EMAIL_USER}>`,
+            to: user.secondary_email,
+            subject: '🔐 Your Login Verification Code — ProjexPM',
+            html: `
+              <div style="font-family:sans-serif;max-width:480px;margin:auto">
+                <h2 style="color:#01696f">Two-Step Verification</h2>
+                <p>Hi ${user.name},</p>
+                <p>Someone is trying to log in to your ProjexPM account. Enter this code to continue:</p>
+                <div style="font-size:48px;font-weight:800;letter-spacing:12px;color:#01696f;
+                            padding:24px;background:#f3f0ec;border-radius:12px;text-align:center;margin:24px 0">
+                  ${otp}
+                </div>
+                <p>This code expires in <strong>10 minutes</strong>.</p>
+                <p style="color:#7a7974;font-size:13px">
+                  If you didn't try to log in, your password may be compromised. 
+                  Change it immediately at <a href="#">projexpm.com</a>.
+                </p>
+              </div>
+            `
+          });
+        } catch (emailErr) {
+          console.error('2FA email send failed:', emailErr.message);
+          // Still return requires_2fa — don't block login over email failure
+        }
+      }
+
+      // ⚠️ Return WITHOUT a JWT — user is not authenticated yet
+      return res.json({
+        success: true,
+        requires_2fa: true,
+        user_id: user.user_id,
+        message: `A verification code has been sent to your secondary email.`
+      });
+    }
+    // ── END 2FA CHECK ──────────────────────────────────────────
+
+    // 2FA not enabled — issue JWT immediately
+    const token = jwt.sign(
+      { user_id: user.user_id, tenant_id: user.tenant_id, role: user.role, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Login successful.',
+      data: {
+        token,
+        user: {
+          user_id: user.user_id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          org_name: user.org_name,
+          plan: user.plan
+        }
+      }
     });
 
   } catch (err) {

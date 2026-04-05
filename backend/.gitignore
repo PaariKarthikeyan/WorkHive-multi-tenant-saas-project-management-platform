@@ -1,5 +1,12 @@
+.vscode
+.env
+attendance_columns.txt
+migrate.js
+migrate_auth.js
+
 # Dependencies
 node_modules/
+package-lock.json
 
 # Environment variables
 .env

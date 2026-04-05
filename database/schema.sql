@@ -44,6 +44,9 @@ CREATE TABLE users (
   last_name     VARCHAR(80)   NOT NULL,
   email         VARCHAR(150)  NOT NULL UNIQUE,
   password_hash VARCHAR(255)  NOT NULL,
+  secondary_email VARCHAR(150),
+  phone         VARCHAR(20),
+  two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0,
   is_active     TINYINT(1)    NOT NULL DEFAULT 1,
   created_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -102,7 +105,7 @@ CREATE TABLE billing_summary (
 CREATE TABLE teams (
   team_id    INT          AUTO_INCREMENT PRIMARY KEY,
   tenant_id  INT          NOT NULL,
-  name       VARCHAR(100) NOT NULL,
+  team_name  VARCHAR(100) NOT NULL,
   manager_id INT          NOT NULL,
   created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -353,13 +356,88 @@ CREATE TABLE IF NOT EXISTS team_messages (
   message_id   INT           AUTO_INCREMENT PRIMARY KEY,
   team_id      INT           NOT NULL,
   sender_id    INT           NOT NULL,
+  reply_to_id  INT           DEFAULT NULL,
   message      TEXT          NOT NULL,
+  is_deleted   TINYINT(1)    DEFAULT 0,
   created_at   TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (team_id)   REFERENCES teams(team_id)   ON DELETE CASCADE,
   FOREIGN KEY (sender_id) REFERENCES users(user_id)   ON DELETE CASCADE,
+  FOREIGN KEY (reply_to_id) REFERENCES team_messages(message_id) ON DELETE SET NULL,
   INDEX idx_msgs_team (team_id),
   INDEX idx_msgs_created (created_at)
 ) ENGINE=InnoDB;
 
--- Verify all tables
+CREATE TABLE IF NOT EXISTS team_message_reads (
+  message_id INT NOT NULL,
+  user_id INT NOT NULL,
+  read_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (message_id, user_id),
+  FOREIGN KEY (message_id) REFERENCES team_messages(message_id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS team_message_deletions (
+  message_id INT NOT NULL,
+  user_id INT NOT NULL,
+  deleted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (message_id, user_id),
+  FOREIGN KEY (message_id) REFERENCES team_messages(message_id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+
+-- ══════════════════════════════════════════════
+--  20. ATTENDANCE
+--  Daily attendance tracking per employee
+-- ══════════════════════════════════════════════
+CREATE TABLE attendance (
+  id           INT           AUTO_INCREMENT PRIMARY KEY,
+  user_id      INT           NOT NULL,
+  tenant_id    INT           NOT NULL,
+  date         DATE          NOT NULL,
+  check_in     TIMESTAMP     NULL,
+  check_out    TIMESTAMP     NULL,
+  status       ENUM('present','absent','half_day','late','on_leave') NOT NULL DEFAULT 'present',
+  work_hours   DECIMAL(4,2)  NULL DEFAULT 0.00,
+  notes        VARCHAR(255)  NULL,
+  created_at   TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  FOREIGN KEY (user_id)   REFERENCES users(user_id)     ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)  ON DELETE CASCADE,
+  UNIQUE KEY uq_attendance_user_date (user_id, date),
+  INDEX idx_attendance_tenant (tenant_id),
+  INDEX idx_attendance_date   (date)
+) ENGINE=InnoDB;
+
+
+-- ══════════════════════════════════════════════
+--  21. LEAVE_REQUESTS
+--  Employee leave application workflow
+-- ══════════════════════════════════════════════
+CREATE TABLE leave_requests (
+  id              INT           AUTO_INCREMENT PRIMARY KEY,
+  user_id         INT           NOT NULL,
+  tenant_id       INT           NOT NULL,
+  leave_type      ENUM('sick','casual','earned','unpaid','maternity','paternity','compensatory') NOT NULL,
+  start_date      DATE          NOT NULL,
+  end_date        DATE          NOT NULL,
+  total_days      DECIMAL(3,1)  NOT NULL DEFAULT 1.0,
+  reason          TEXT          NOT NULL,
+  status          ENUM('pending','approved','rejected','cancelled') NOT NULL DEFAULT 'pending',
+  approved_by     INT           NULL,
+  reviewed_at     TIMESTAMP     NULL,
+  admin_remarks   VARCHAR(500)  NULL,
+  created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  FOREIGN KEY (user_id)     REFERENCES users(user_id)    ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id)   REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+  FOREIGN KEY (approved_by) REFERENCES users(user_id)    ON DELETE SET NULL,
+  INDEX idx_leave_user   (user_id),
+  INDEX idx_leave_tenant (tenant_id),
+  INDEX idx_leave_status (status)
+) ENGINE=InnoDB;
+
+
+-- Verify all 21 tables
 SHOW TABLES;

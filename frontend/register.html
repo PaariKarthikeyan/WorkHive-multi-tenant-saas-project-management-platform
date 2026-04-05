@@ -703,7 +703,7 @@
             x-text="apiError"
           ></div>
 
-          <button type="submit" class="btn-submit" :disabled="loading">Create Account
+          <button type="submit" class="btn-submit" :disabled="loading">
             <template x-if="loading">
               <div
                 style="
@@ -820,10 +820,17 @@
             email: "",
             password: "",
             confirm: "",
-            secondary_email: "", // ← new
-            phone: "", // ← new
-            two_factor_enabled: false, // ← new
+            secondary_email: "",
+            phone: "",
+            two_factor_enabled: false,
           },
+          errors: {},
+          apiError: "",
+          loading: false,
+          showPlanModal: false,
+          showPayment: false,
+          showSuccess: false,
+          selectedPlan: "free",
 
           validate() {
             this.errors = {};
@@ -885,6 +892,9 @@
                       this.form.first_name + " " + this.form.last_name,
                     admin_email: this.form.email,
                     admin_password: this.form.password,
+                    secondary_email: this.form.secondary_email,
+                    phone: this.form.phone,
+                    two_factor_enabled: this.form.two_factor_enabled,
                     plan: "free",
                   }),
                 },

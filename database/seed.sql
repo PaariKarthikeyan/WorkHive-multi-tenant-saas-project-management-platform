@@ -1,20 +1,24 @@
 -- ═══════════════════════════════════════════════════════════
---  SaaS PM — Rich Seed Data (All 18 Tables)
+--  SaaS PM — Rich Seed Data (All 21 Tables)
 --  Run AFTER schema.sql
 --  Covers: 3 Tenants, 18 Users, 4 Teams, 8 Projects,
 --          24 Tasks, Files, Queries, Notifications,
---          Performance Metrics, Reports, Billing & more
+--          Attendance, Leave Requests, Performance Metrics,
+--          Reports, Billing & more
 -- ═══════════════════════════════════════════════════════════
 
 USE saas_pm;
 SET FOREIGN_KEY_CHECKS = 0;
 
+TRUNCATE TABLE leave_requests;
+TRUNCATE TABLE attendance;
 TRUNCATE TABLE monthly_reports;
 TRUNCATE TABLE tenant_metrics;
 TRUNCATE TABLE user_performance_metrics;
 TRUNCATE TABLE analytics_summary;
 TRUNCATE TABLE activity_logs;
 TRUNCATE TABLE notifications;
+TRUNCATE TABLE team_messages;
 TRUNCATE TABLE task_files;
 TRUNCATE TABLE project_files;
 TRUNCATE TABLE queries;
@@ -96,7 +100,7 @@ INSERT INTO billing_summary (tenant_id, billing_period, base_charge, usage_charg
 -- ══════════════════════════════════════════
 --  5. TEAMS (4 teams)
 -- ══════════════════════════════════════════
-INSERT INTO teams (team_id, tenant_id, name, manager_id) VALUES
+INSERT INTO teams (team_id, tenant_id, team_name, manager_id) VALUES
 (1, 1, 'Alpha Dev Team',       2),
 (2, 1, 'Beta QA Team',         3),
 (3, 2, 'Core Engineering',    10),
@@ -407,6 +411,84 @@ INSERT INTO analytics_summary (tenant_id, total_projects, active_projects, total
 (1, 4, 3, 12, 7, 3, 2, 2, 5),
 (2, 3, 3, 9,  5, 2, 2, 2, 4),
 (3, 1, 1, 3,  1, 1, 1, 0, 1);
+
+
+-- ══════════════════════════════════════════
+--  18. ATTENDANCE (March 2026 records)
+-- ══════════════════════════════════════════
+INSERT INTO attendance (user_id, tenant_id, date, check_in, check_out, status, work_hours, notes) VALUES
+-- TechCorp (tenant 1) — Raj, Priya, Suresh
+(4,  1, '2026-03-24', '2026-03-24 09:05:00', '2026-03-24 18:10:00', 'present',   9.08, NULL),
+(4,  1, '2026-03-25', '2026-03-25 09:30:00', '2026-03-25 18:00:00', 'present',   8.50, NULL),
+(4,  1, '2026-03-26', '2026-03-26 10:15:00', '2026-03-26 18:30:00', 'late',      8.25, 'Traffic delay'),
+(4,  1, '2026-03-27', NULL,                   NULL,                  'on_leave',  0.00, 'Sick leave'),
+(4,  1, '2026-03-28', '2026-03-28 09:00:00', '2026-03-28 18:00:00', 'present',   9.00, NULL),
+(5,  1, '2026-03-24', '2026-03-24 08:55:00', '2026-03-24 18:20:00', 'present',   9.42, NULL),
+(5,  1, '2026-03-25', '2026-03-25 09:00:00', '2026-03-25 13:00:00', 'half_day',  4.00, 'Doctor appointment'),
+(5,  1, '2026-03-26', '2026-03-26 09:10:00', '2026-03-26 18:15:00', 'present',   9.08, NULL),
+(5,  1, '2026-03-27', '2026-03-27 09:00:00', '2026-03-27 18:00:00', 'present',   9.00, NULL),
+(5,  1, '2026-03-28', '2026-03-28 09:05:00', '2026-03-28 18:05:00', 'present',   9.00, NULL),
+(6,  1, '2026-03-24', '2026-03-24 09:00:00', '2026-03-24 18:00:00', 'present',   9.00, NULL),
+(6,  1, '2026-03-25', '2026-03-25 09:00:00', '2026-03-25 18:30:00', 'present',   9.50, NULL),
+(6,  1, '2026-03-26', NULL,                   NULL,                  'absent',    0.00, 'No show — unmarked'),
+(6,  1, '2026-03-27', '2026-03-27 09:15:00', '2026-03-27 18:00:00', 'present',   8.75, NULL),
+(6,  1, '2026-03-28', '2026-03-28 09:00:00', '2026-03-28 18:00:00', 'present',   9.00, NULL),
+-- Innovatech (tenant 2) — Arjun, Divya
+(12, 2, '2026-03-24', '2026-03-24 09:00:00', '2026-03-24 18:30:00', 'present',   9.50, NULL),
+(12, 2, '2026-03-25', '2026-03-25 09:10:00', '2026-03-25 18:00:00', 'present',   8.83, NULL),
+(12, 2, '2026-03-26', '2026-03-26 09:00:00', '2026-03-26 18:00:00', 'present',   9.00, NULL),
+(13, 2, '2026-03-24', '2026-03-24 09:30:00', '2026-03-24 18:00:00', 'present',   8.50, NULL),
+(13, 2, '2026-03-25', NULL,                   NULL,                  'on_leave',  0.00, 'Casual leave'),
+(13, 2, '2026-03-26', '2026-03-26 09:00:00', '2026-03-26 18:15:00', 'present',   9.25, NULL),
+-- StartupNest (tenant 3) — Kiran
+(18, 3, '2026-03-24', '2026-03-24 10:00:00', '2026-03-24 19:00:00', 'late',      9.00, 'WFH — started late'),
+(18, 3, '2026-03-25', '2026-03-25 09:00:00', '2026-03-25 18:00:00', 'present',   9.00, NULL),
+(18, 3, '2026-03-26', '2026-03-26 09:00:00', '2026-03-26 18:00:00', 'present',   9.00, NULL);
+
+
+-- ══════════════════════════════════════════
+--  19. LEAVE REQUESTS
+-- ══════════════════════════════════════════
+INSERT INTO leave_requests (user_id, tenant_id, leave_type, start_date, end_date, total_days, reason, status, approved_by, reviewed_at, admin_remarks) VALUES
+-- TechCorp (tenant 1)
+(4,  1, 'sick',       '2026-03-27', '2026-03-27', 1.0,
+ 'Fever and cold, need rest for one day.',
+ 'approved', 2, '2026-03-26 17:30:00', 'Take care, Raj. Get well soon.'),
+
+(5,  1, 'casual',     '2026-04-10', '2026-04-11', 2.0,
+ 'Family function — sister wedding reception.',
+ 'approved', 2, '2026-03-28 10:00:00', 'Approved. Please hand over tasks to Suresh.'),
+
+(6,  1, 'earned',     '2026-04-21', '2026-04-25', 5.0,
+ 'Planned vacation — travelling to Kerala.',
+ 'pending',  NULL, NULL, NULL),
+
+(7,  1, 'sick',       '2026-03-10', '2026-03-11', 2.0,
+ 'Migraine — unable to work on screen.',
+ 'approved', 3, '2026-03-10 09:30:00', 'Approved. Rest well.'),
+
+(8,  1, 'casual',     '2026-04-14', '2026-04-14', 1.0,
+ 'Personal errand — bank and RTO visit.',
+ 'rejected', 3, '2026-04-01 11:00:00', 'Rejected — QA sprint deadline on April 15. Please reschedule.'),
+
+-- Innovatech (tenant 2)
+(13, 2, 'casual',     '2026-03-25', '2026-03-25', 1.0,
+ 'Personal work — need to attend a government office.',
+ 'approved', 10, '2026-03-24 16:00:00', 'OK.'),
+
+(14, 2, 'sick',       '2026-04-05', '2026-04-07', 3.0,
+ 'Dengue fever — doctor advised 3 days bed rest.',
+ 'approved', 10, '2026-04-05 08:00:00', 'Get well soon. Arjun will cover your tasks.'),
+
+(15, 2, 'earned',     '2026-05-01', '2026-05-05', 5.0,
+ 'Summer vacation — travelling with family.',
+ 'pending',  NULL, NULL, NULL),
+
+-- StartupNest (tenant 3)
+(18, 3, 'casual',     '2026-04-02', '2026-04-02', 1.0,
+ 'College convocation ceremony.',
+ 'approved', 17, '2026-03-30 14:00:00', 'Congrats! Approved.');
+
 
 USE saas_pm;
 

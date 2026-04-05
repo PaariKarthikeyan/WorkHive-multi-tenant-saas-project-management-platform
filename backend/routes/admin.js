@@ -6,6 +6,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const db = require('../db');
 const router = express.Router();
+const authMiddleware = require('../middleware/auth');
 
 // ── GET /api/admin/projects ──────────────────────────────────────────────────
 router.get('/projects', async (req, res) => {
@@ -63,10 +64,10 @@ router.post('/projects', async (req, res) => {
     }
 
     const [result] = await db.query(
-      `INSERT INTO projects (tenant_id, name, description, type, priority, estimated_end_date, team_id)
+      `INSERT INTO projects (tenant_id, name, description, type, priority, est_end_date, team_id)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [req.user.tenant_id, name, description || null, type || null,
-       priority || 'medium', estimated_end_date || null, team_id || null]
+      priority || 'medium', estimated_end_date || null, team_id || null]
     );
     res.status(201).json({ success: true, message: 'Project created.', data: { project_id: result.insertId } });
   } catch (err) {
@@ -97,7 +98,7 @@ router.put('/projects/:id', async (req, res) => {
        estimated_end_date=?, team_id=?
        WHERE project_id=? AND tenant_id=?`,
       [name, description, type, priority, status, estimated_end_date,
-       team_id || null, req.params.id, req.user.tenant_id]
+        team_id || null, req.params.id, req.user.tenant_id]
     );
     res.json({ success: true, message: 'Project updated.' });
   } catch (err) {
@@ -261,6 +262,7 @@ router.get('/teams', async (req, res) => {
       `SELECT t.team_id,
           t.team_name,
           t.team_name AS name,
+          t.manager_id,
           CONCAT(u.first_name, ' ', u.last_name) AS manager_name,
           COUNT(tm.employee_id) AS member_count
       FROM teams t
@@ -286,6 +288,15 @@ router.post('/teams', async (req, res) => {
   }
 
   try {
+    // Check if manager already has a team
+    const [existing] = await db.query(
+      'SELECT team_id FROM teams WHERE tenant_id = ? AND manager_id = ?',
+      [req.user.tenant_id, parseInt(manager_id)]
+    );
+    if (existing.length > 0) {
+      return res.status(400).json({ success: false, error: 'This manager is already assigned to a team.' });
+    }
+
     const [result] = await db.query(
       'INSERT INTO teams (tenant_id, team_name, manager_id) VALUES (?, ?, ?)',
       [req.user.tenant_id, team_name, parseInt(manager_id)]
@@ -298,6 +309,23 @@ router.post('/teams', async (req, res) => {
   } catch (err) {
     console.error('Create team error:', err);
     res.status(500).json({ success: false, error: 'Failed to create team.' });
+  }
+});
+
+// ── DELETE /api/admin/teams/:id ───────────────────────────────────────────────
+router.delete('/teams/:id', async (req, res) => {
+  try {
+    const [result] = await db.query(
+      'DELETE FROM teams WHERE team_id = ? AND tenant_id = ?',
+      [req.params.id, req.user.tenant_id]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, error: 'Team not found.' });
+    }
+    res.json({ success: true, message: 'Team deleted.' });
+  } catch (err) {
+    console.error('Delete team error:', err);
+    res.status(500).json({ success: false, error: 'Failed to delete team.' });
   }
 });
 
@@ -359,38 +387,162 @@ router.get('/insights', async (req, res) => {
   }
 });
 
-// ── GET /api/admin/subscription ──────────────────────────────────────────────
-router.get('/subscription', async (req, res) => {
+// GET /api/admin/subscription
+
+// Plan limits map — adjust values to match your actual plans
+const PLAN_LIMITS = {
+  'free': { users: 3, projects: 5 },
+  'pro': { users: 20, projects: 50 },
+  'ultra': { users: 100, projects: 200 },
+  'enterprise': { users: -1, projects: -1 },
+};
+
+router.get('/subscription', authMiddleware, async (req, res) => {
   try {
-    const [[tenant]] = await db.query(
-      'SELECT name, plan, created_at FROM tenants WHERE tenant_id=?',
-      [req.user.tenant_id]
+    const tenant_id = req.user.tenant_id;
+    console.log('Billing fetch for tenant_id:', tenant_id);
+
+    const [[tenantData]] = await db.query(
+      `SELECT t.plan, t.name AS org_name,
+              s.plan_type, s.subscription_plan, s.subscription_status,
+              s.current_period_start, s.current_period_end, s.is_active
+       FROM tenants t
+       LEFT JOIN subscriptions s ON t.tenant_id = s.tenant_id
+       WHERE t.tenant_id = ?`,
+      [tenant_id]
     );
-    const planLimits = {
-      free: { users: 3, projects: 5 },
-      pro: { users: 20, projects: 50 },
-      ultra: { users: 100, projects: 200 },
-      enterprise: { users: -1, projects: -1 },
-    };
-    res.json({ success: true, data: { ...tenant, limits: planLimits[tenant.plan] } });
+
+    const [billing] = await db.query(
+      `SELECT id, billing_period, period_start, period_end, base_charge, usage_charge,
+              storage_gb, api_calls_used, total_due, status
+       FROM billing_summary
+       WHERE tenant_id = ?
+       ORDER BY period_start DESC, id DESC
+       LIMIT 12`,
+      [tenant_id]
+    );
+
+    // ✅ Lookup limits by plan name (case-insensitive)
+    const planKey = (tenantData?.subscription_plan ?? tenantData?.plan_type ?? tenantData?.plan ?? '').toLowerCase();
+    const limits = PLAN_LIMITS[planKey] ?? { users: -1, projects: -1 };
+
+    return res.json({
+      success: true,
+      data: {
+        plan: tenantData?.subscription_plan ?? tenantData?.plan_type ?? tenantData?.plan,
+        subscriptionend: tenantData?.current_period_end,
+        is_active: tenantData?.is_active,
+        status: tenantData?.subscription_status,
+        limits,
+        billingHistory: billing,
+      }
+    });
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, error: 'Failed to fetch subscription.' });
+    console.error('Subscription route error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to load subscription data.' });
   }
 });
 
 // ── PUT /api/admin/subscription ──────────────────────────────────────────────
 router.put('/subscription', async (req, res) => {
-  const { plan } = req.body;
+  const { plan, billing_cycle } = req.body;
+  const cycle = billing_cycle || 'monthly';
+
   if (!['free', 'pro', 'ultra', 'enterprise'].includes(plan)) {
     return res.status(400).json({ success: false, error: 'Invalid plan.' });
   }
   try {
     await db.query('UPDATE tenants SET plan=? WHERE tenant_id=?', [plan, req.user.tenant_id]);
-    res.json({ success: true, message: `Plan updated to ${plan}.` });
+
+    // Updated pricing matrix to match tiered requirements
+    const PLAN_CHARGES = {
+      monthly:   { free: 0, pro: 299,  ultra: 499,   enterprise: 999 },
+      annual:    { free: 0, pro: 2999, ultra: 5099,  enterprise: 10099 },
+      lifetime:  { free: 0, pro: 4999, ultra: 14999, enterprise: 23999 }
+    };
+
+    const period = new Date().toISOString().slice(0, 7);
+    const [[existing]] = await db.query(
+      `SELECT id FROM billing_summary WHERE tenant_id = ? AND billing_period = ?`,
+      [req.user.tenant_id, period]
+    );
+
+    if (!existing) {
+      const base_charge = PLAN_CHARGES[cycle]?.[plan] ?? 0;
+      
+      // Calculate period end based on cycle
+      let interval = '1 MONTH';
+      if (cycle === 'annual') interval = '1 YEAR';
+      if (cycle === 'lifetime') interval = '99 YEAR';
+
+      await db.query(`
+        INSERT INTO billing_summary
+          (tenant_id, billing_period, period_start, period_end, base_charge, usage_charge, storage_gb, api_calls_used, total_due, status)
+        VALUES (?, ?, CURRENT_TIMESTAMP, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ${interval}), ?, 0, 0, 0, ?, 'pending')`,
+        [req.user.tenant_id, period, base_charge.toFixed(2), base_charge.toFixed(2)]
+      );
+    }
+
+    res.json({ success: true, message: `Plan updated to ${plan} (${cycle}).` });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, error: 'Failed to update plan.' });
+  }
+});
+
+// ✅ No authMiddleware needed here — already applied in server.js
+router.patch('/billing/:id/pay', async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const billing_id = req.params.id;
+
+    const [[bill]] = await db.query(
+      `SELECT id, status FROM billing_summary WHERE id = ? AND tenant_id = ?`,
+      [billing_id, tenant_id]
+    );
+
+    if (!bill) return res.status(404).json({ success: false, error: 'Bill not found.' });
+    if (bill.status === 'paid') return res.status(400).json({ success: false, error: 'Already paid.' });
+
+    await db.query(
+      `UPDATE billing_summary SET status = 'paid' WHERE id = ? AND tenant_id = ?`,
+      [billing_id, tenant_id]
+    );
+
+    res.json({ success: true, message: 'Payment recorded.' });
+  } catch (err) {
+    console.error('Pay bill error:', err);
+    res.status(500).json({ success: false, error: 'Failed to process payment.' });
+  }
+});
+
+// ── GET /api/admin/employees/attendance ──────────────────────────────────────
+router.get('/employees/attendance', async (req, res) => {
+  try {
+    const period = req.query.period || 'today';
+    let dateFilter = 'a.date = CURDATE()';
+    if (period === '7days') dateFilter = 'a.date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) AND a.date <= CURDATE()';
+    if (period === '30days') dateFilter = 'a.date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND a.date <= CURDATE()';
+
+    const [roster] = await db.query(
+      `SELECT u.user_id, CONCAT(u.first_name, ' ', u.last_name) AS name, u.email, 
+              r.name AS role,
+              t.team_name AS team,
+              a.date, a.clock_in, a.clock_out, a.status
+       FROM users u
+       JOIN roles r ON u.role_id = r.role_id
+       LEFT JOIN team_members tm ON u.user_id = tm.employee_id
+       LEFT JOIN teams t ON tm.team_id = t.team_id
+       LEFT JOIN attendance a ON u.user_id = a.user_id AND ${dateFilter}
+       WHERE u.tenant_id = ?
+       ORDER BY a.date DESC, u.role_id ASC, u.first_name ASC`,
+      [req.user.tenant_id]
+    );
+    res.json({ success: true, data: roster });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Failed to fetch organization attendance.' });
   }
 });
 

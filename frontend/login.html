@@ -558,7 +558,9 @@
     <div class="login-card" x-show="screen === 'verify2fa'" x-cloak>
       <div class="card-header">
         <div class="logo">
+                   
           <svg width="24" height="24" viewBox="0 0 28 28" fill="none">
+                       
             <rect
               x="2"
               y="2"
@@ -568,6 +570,7 @@
               fill="currentColor"
               opacity=".9"
             />
+                       
             <rect
               x="16"
               y="2"
@@ -577,6 +580,7 @@
               fill="currentColor"
               opacity=".5"
             />
+                       
             <rect
               x="2"
               y="16"
@@ -586,6 +590,7 @@
               fill="currentColor"
               opacity=".5"
             />
+                       
             <rect
               x="16"
               y="16"
@@ -594,39 +599,68 @@
               rx="2"
               fill="currentColor"
             />
+                     
           </svg>
           ProjexPM
         </div>
-        <h1>Two-Step Verification</h1>
-        <p>Enter the 6-digit code sent to your secondary email</p>
+        <h1>Check your email</h1>
+        <p>Enter the 6-digit code sent to your secondary email address.</p>
       </div>
-      <div x-show="apiError" class="error-banner">
-        <i data-lucide="alert-circle" style="width: 16px; height: 16px"></i
-        ><span x-text="apiError"></span>
+
+      <!-- Error banner -->
+      <div class="error-banner" x-show="apiError" x-cloak>
+        <span x-text="apiError"></span>
       </div>
+
       <div class="field">
-        <label>Verification Code</label>
+        <label for="otp_input">Verification Code</label>
         <input
+          id="otp_input"
           type="text"
+          inputmode="numeric"
           maxlength="6"
-          placeholder="123456"
+          placeholder="• • • • • •"
           x-model="twoFaOtp"
+          @keyup.enter="verify2fa()"
+          autocomplete="one-time-code"
           style="
             text-align: center;
-            letter-spacing: 8px;
-            font-size: var(--text-xl);
+            letter-spacing: 10px;
+            font-size: 1.5rem;
             font-weight: 800;
           "
         />
       </div>
+
       <button
         class="btn-submit"
+        style="color: #fff"
         @click="verify2fa()"
-        :disabled="loading"
-        x-text="loading ? 'Verifying...' : 'Verify Code'"
+        :disabled="loading || twoFaOtp.length !== 6"
+        x-text="loading ? 'Verifying...' : 'Verify & Login'"
       ></button>
-      <div class="card-footer" style="margin-top: var(--sp4)">
-        <a href="#" @click.prevent="screen='login'">← Back to login</a>
+
+      <div
+        style="
+          text-align: center;
+          margin-top: 1rem;
+          font-size: 0.875rem;
+          color: var(--txtm);
+        "
+      >
+        Didn't receive the code?
+        <a href="#" @click.prevent="submitLogin()" style="color: var(--pr)"
+          >Resend</a
+        >
+      </div>
+
+      <div style="text-align: center; margin-top: 0.5rem">
+        <a
+          href="#"
+          @click.prevent="screen='login'; twoFaUserId=null"
+          style="font-size: 0.875rem; color: var(--txtm)"
+          >← Back to login</a
+        >
       </div>
     </div>
 
@@ -726,6 +760,9 @@
     </div>
 
     <script>
+
+      const API = 'http://localhost:3000/api';  
+
       function loginApp() {
         return {
           screen: "login", // 'login' | 'forgot' | 'otp' | 'reset' | 'verify2fa'
@@ -747,8 +784,9 @@
             this.apiError = "";
             if (!this.validate()) return;
             this.loading = true;
+
             try {
-              const res = await fetch("http://localhost:3000/api/auth/login", {
+              const res = await fetch(`${API}/auth/login`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -757,22 +795,20 @@
                 }),
               });
               const data = await res.json();
+
               if (!res.ok) throw new Error(data.error || "Login failed");
 
               if (data.requires_2fa) {
-                // Show 2FA screen
+                // ✅ Store user_id temporarily (NOT the token — no token yet)
                 this.twoFaUserId = data.user_id;
-                this.screen = "verify2fa";
+                this.twoFaOtp = "";
+                this.apiError = "";
+                this.screen = "verify2fa"; // Switch to OTP screen
                 return;
               }
 
-              localStorage.setItem("token", data.data.token);
-              localStorage.setItem("user", JSON.stringify(data.data.user));
-              const role = data.data.user.role;
-              if (role === "admin") location.href = "admin/dashboard.html";
-              else if (role === "manager")
-                location.href = "manager/dashboard.html";
-              else location.href = "employee/dashboard.html";
+              // No 2FA — store token and redirect
+              this._handleLoginSuccess(data.data);
             } catch (err) {
               this.apiError = err.message;
             } finally {
@@ -780,41 +816,47 @@
             }
           },
 
-          // ── 2FA Verify ────────────────────────────────────
           async verify2fa() {
             this.apiError = "";
-            if (!this.twoFaOtp.trim()) {
-              this.apiError = "Enter the OTP sent to your secondary email.";
+            if (!this.twoFaOtp || this.twoFaOtp.length !== 6) {
+              this.apiError =
+                "Enter the 6-digit code sent to your secondary email.";
               return;
             }
             this.loading = true;
-            try {
-              const res = await fetch(
-                "http://localhost:3000/api/auth/verify-2fa",
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    user_id: this.twoFaUserId,
-                    otp: this.twoFaOtp,
-                  }),
-                },
-              );
-              const data = await res.json();
-              if (!res.ok) throw new Error(data.error);
 
-              localStorage.setItem("token", data.data.token);
-              localStorage.setItem("user", JSON.stringify(data.data.user));
-              const role = data.data.user.role;
-              if (role === "admin") location.href = "admin/dashboard.html";
-              else if (role === "manager")
-                location.href = "manager/dashboard.html";
-              else location.href = "employee/dashboard.html";
+            try {
+              const res = await fetch(`${API}/auth/verify-2fa`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  user_id: this.twoFaUserId,
+                  otp: this.twoFaOtp,
+                }),
+              });
+              const data = await res.json();
+
+              if (!res.ok) throw new Error(data.error || "Invalid code.");
+
+              // ✅ NOW store token and redirect — user is fully authenticated
+              this._handleLoginSuccess(data.data);
             } catch (err) {
               this.apiError = err.message;
+              this.twoFaOtp = ""; // Clear wrong OTP
             } finally {
               this.loading = false;
             }
+          },
+
+          // Shared redirect logic
+          _handleLoginSuccess(userData) {
+            localStorage.setItem("token", userData.token);
+            localStorage.setItem("user", JSON.stringify(userData.user));
+            const role = userData.user.role;
+            if (role === "admin") location.href = "admin/dashboard.html";
+            else if (role === "manager")
+              location.href = "manager/dashboard.html";
+            else location.href = "employee/dashboard.html";
           },
 
           // ── Forgot Password ───────────────────────────────

@@ -92,6 +92,15 @@ router.post('/tasks', async (req, res) => {
     return res.status(400).json({ success: false, error: 'project_id and title are required.' });
   }
   try {
+    if (due_date) {
+      const [[project]] = await db.query('SELECT end_date FROM projects WHERE project_id = ?', [project_id]);
+      if (project && project.end_date) {
+        if (new Date(due_date) > new Date(project.end_date)) {
+          return res.status(400).json({ success: false, error: 'Task deadline cannot be after the project deadline.' });
+        }
+      }
+    }
+
     const [result] = await db.query(
       `INSERT INTO tasks (project_id, assigned_by, name, description, priority, deadline)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -106,9 +115,19 @@ router.post('/tasks', async (req, res) => {
 
 // ── PUT /api/manager/tasks/:id/assign ────────────────────────────────────────
 router.put('/tasks/:id/assign', async (req, res) => {
-  const { user_id } = req.body;
+  const user_id = req.body.user_id || req.body.assigned_to;
   if (!user_id) return res.status(400).json({ success: false, error: 'user_id is required.' });
   try {
+    // Verify role of the recipient
+    const [[recipient]] = await db.query(
+      'SELECT r.name FROM users u JOIN roles r ON u.role_id = r.role_id WHERE u.user_id = ? AND u.tenant_id = ?',
+      [user_id, req.user.tenant_id]
+    );
+
+    if (!recipient || recipient.name !== 'employee') {
+      return res.status(403).json({ success: false, error: 'Tasks can only be assigned to employees.' });
+    }
+
     await db.query(
       `UPDATE tasks SET assigned_to=?, status='in_progress'
        WHERE task_id=? AND assigned_by=?`,
@@ -125,6 +144,18 @@ router.put('/tasks/:id/assign', async (req, res) => {
 router.put('/tasks/:id', async (req, res) => {
   const { title, description, priority, due_date, status } = req.body;
   try {
+    if (due_date) {
+      const [[task]] = await db.query('SELECT project_id FROM tasks WHERE task_id = ?', [req.params.id]);
+      if (task) {
+        const [[project]] = await db.query('SELECT end_date FROM projects WHERE project_id = ?', [task.project_id]);
+        if (project && project.end_date) {
+          if (new Date(due_date) > new Date(project.end_date)) {
+            return res.status(400).json({ success: false, error: 'Task deadline cannot be after the project deadline.' });
+          }
+        }
+      }
+    }
+
     await db.query(
       `UPDATE tasks SET name=?, description=?, priority=?, deadline=?, status=?
        WHERE task_id=? AND assigned_by=?`,
@@ -169,13 +200,15 @@ router.get('/team', async (req, res) => {
       `SELECT u.user_id,
               CONCAT(u.first_name,' ',u.last_name) AS name,
               u.email,
+              r.name AS role,
               COUNT(t.task_id) AS total_tasks,
               SUM(t.status='completed') AS completed_tasks,
               SUM(t.status='in_progress') AS inprogress_tasks
        FROM team_members tm
        JOIN users u ON tm.employee_id = u.user_id
+       JOIN roles r ON u.role_id = r.role_id
        LEFT JOIN tasks t ON t.assigned_to = u.user_id
-       WHERE tm.team_id=?
+       WHERE tm.team_id=? AND r.name = 'employee'
        GROUP BY u.user_id`,
       [team.team_id]
     );
@@ -245,6 +278,16 @@ router.put('/queries/:id/reply', async (req, res) => {
   const { reply } = req.body;
   if (!reply) return res.status(400).json({ success: false, error: 'Reply text is required.' });
   try {
+    // ── CHECK if already answered ────────────────────────
+    const [[query]] = await db.query(
+      'SELECT is_answered FROM queries WHERE id=? AND manager_id=?',
+      [req.params.id, req.user.user_id]
+    );
+    if (!query) return res.status(404).json({ success: false, error: 'Query not found.' });
+    if (query.is_answered) {
+      return res.status(400).json({ success: false, error: 'Query already answered.' });
+    }
+
     await db.query(
       `UPDATE queries SET reply=?, is_answered=1
        WHERE id=? AND manager_id=?`,
@@ -275,8 +318,9 @@ router.get('/insights', async (req, res) => {
               ROUND(SUM(t.status='completed') / NULLIF(COUNT(t.task_id),0) * 100, 1) AS completion_pct
        FROM team_members tm
        JOIN users u ON tm.employee_id = u.user_id
+       JOIN roles r ON u.role_id = r.role_id
        LEFT JOIN tasks t ON t.assigned_to = u.user_id
-       WHERE tm.team_id=?
+       WHERE tm.team_id=? AND r.name = 'employee'
        GROUP BY u.user_id ORDER BY completed DESC`,
       [team.team_id]
     );
@@ -284,6 +328,132 @@ router.get('/insights', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, error: 'Failed to fetch insights.' });
+  }
+});
+
+// ── GET /api/manager/attendance/today ────────────────────────────────────────
+router.get('/attendance/today', async (req, res) => {
+  try {
+    const [[attendance]] = await db.query(
+      `SELECT * FROM attendance WHERE user_id=? AND date=CURDATE()`,
+      [req.user.user_id]
+    );
+    res.json({ success: true, data: attendance || null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to fetch attendance.' });
+  }
+});
+
+// ── GET /api/manager/attendance/history ──────────────────────────────────────
+router.get('/attendance/history', async (req, res) => {
+  try {
+    const [history] = await db.query(
+      `SELECT date, clock_in, clock_out, status FROM attendance WHERE user_id=? ORDER BY date DESC LIMIT 7`,
+      [req.user.user_id]
+    );
+    res.json({ success: true, data: history });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to fetch history.' });
+  }
+});
+
+// ── GET /api/manager/team/attendance ─────────────────────────────────────────
+router.get('/team/attendance', async (req, res) => {
+  try {
+    const [[team]] = await db.query(
+      'SELECT team_id FROM teams WHERE manager_id=? AND tenant_id=?',
+      [req.user.user_id, req.user.tenant_id]
+    );
+    if (!team) return res.json({ success: true, data: [] });
+
+    const period = req.query.period || 'today';
+    let dateFilter = 'a.date = CURDATE()';
+    if (period === '7days') dateFilter = 'a.date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) AND a.date <= CURDATE()';
+    if (period === '30days') dateFilter = 'a.date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND a.date <= CURDATE()';
+
+    // Fetch team members mapped with their attendance logs
+    const [members] = await db.query(
+      `SELECT u.user_id, CONCAT(u.first_name, ' ', u.last_name) AS name, u.email,
+              a.date, a.clock_in, a.clock_out, a.status
+       FROM team_members tm
+       JOIN users u ON tm.employee_id = u.user_id
+       LEFT JOIN attendance a ON a.user_id = u.user_id AND ${dateFilter}
+       WHERE tm.team_id = ?
+       ORDER BY a.date DESC, u.first_name ASC`,
+       [team.team_id]
+    );
+    res.json({ success: true, data: members });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Failed.' });
+  }
+});
+
+// ── POST /api/manager/attendance/check-in ────────────────────────────────────
+router.post('/attendance/check-in', async (req, res) => {
+  try {
+    const [[existing]] = await db.query(
+      `SELECT clock_in FROM attendance WHERE user_id=? AND date=CURDATE()`,
+      [req.user.user_id]
+    );
+    if (existing) return res.status(400).json({ success: false, error: 'Already checked in today.' });
+
+    await db.query(
+      `INSERT INTO attendance (user_id, tenant_id, date, clock_in, status)
+       VALUES (?, ?, CURDATE(), NOW(), 'present')`,
+      [req.user.user_id, req.user.tenant_id]
+    );
+    res.json({ success: true, message: 'Checked in successfully.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to check in.' });
+  }
+});
+
+// ── PUT /api/manager/attendance/check-out ────────────────────────────────────
+router.put('/attendance/check-out', async (req, res) => {
+  try {
+    const [[attendance]] = await db.query(
+      `SELECT clock_in, clock_out FROM attendance WHERE user_id=? AND date=CURDATE()`,
+      [req.user.user_id]
+    );
+    if (!attendance) return res.status(400).json({ success: false, error: 'No check-in record found for today.' });
+    if (attendance.clock_out) return res.status(400).json({ success: false, error: 'Already checked out today.' });
+
+    await db.query(
+      `UPDATE attendance SET clock_out=NOW() WHERE user_id=? AND date=CURDATE()`,
+      [req.user.user_id]
+    );
+    res.json({ success: true, message: 'Checked out successfully.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to check out.' });
+  }
+});
+
+// ── DELETE /api/manager/attendance/today ─────────────────────────────────────
+router.delete('/attendance/today', async (req, res) => {
+  try {
+    const [result] = await db.query(
+      `DELETE FROM attendance WHERE user_id=? AND date=CURDATE() AND clock_out IS NULL`,
+      [req.user.user_id]
+    );
+    if (result.affectedRows === 0) return res.status(400).json({ success: false, error: 'Cannot undo.' });
+    res.json({ success: true, message: 'Check-in undone.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to undo check-in.' });
+  }
+});
+
+// ── PUT /api/manager/attendance/undo-check-out ───────────────────────────────
+router.put('/attendance/undo-check-out', async (req, res) => {
+  try {
+    const [result] = await db.query(
+      `UPDATE attendance SET clock_out=NULL WHERE user_id=? AND date=CURDATE()`,
+      [req.user.user_id]
+    );
+    if (result.affectedRows === 0) return res.status(400).json({ success: false, error: 'Cannot undo check-out.' });
+    res.json({ success: true, message: 'Checkout undone.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to undo check-out.' });
   }
 });
 
