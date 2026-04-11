@@ -67,6 +67,17 @@ router.post('/register', async (req, res) => {
       return res.status(409).json({ success: false, error: 'Email already registered.' });
     }
 
+    if (secondary_email) {
+      const [secExisting] = await conn.query(
+        'SELECT user_id FROM users WHERE email=? OR secondary_email=?',
+        [secondary_email, secondary_email]
+      );
+      if (secExisting.length > 0) {
+        await conn.rollback();
+        return res.status(409).json({ success: false, error: 'Secondary email is already in use by another account.' });
+      }
+    }
+
     const [tenantResult] = await conn.query(
       'INSERT INTO tenants (name, plan) VALUES (?, ?)',
       [org_name, plan || 'free']

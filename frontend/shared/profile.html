@@ -1997,8 +1997,18 @@
                 },
               );
               const data = await res.json();
+              if (data.requires_otp) {
+                const enteredOtp = window.prompt(data.message + '\n\nPlease enter the 6-digit OTP:');
+                if (enteredOtp) {
+                  this.secForm.otp = enteredOtp;
+                  return this.saveSecurity();
+                } else {
+                  throw new Error("OTP required to change secondary email.");
+                }
+              }
               if (!data.success) throw new Error(data.error);
               this.success = data.message;
+              this.secForm.otp = "";
               this.profile.secondary_email = this.secForm.secondary_email;
               this.profile.phone = this.secForm.phone;
               this.profile.two_factor_enabled = this.secForm.two_factor_enabled

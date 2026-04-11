@@ -22,6 +22,7 @@ const managerRoutes = require('./routes/manager');
 const employeeRoutes = require('./routes/employee');
 const profileRoutes = require('./routes/profile');
 const subscriptionRoutes = require('./routes/subscription');
+const notificationRoutes = require('./routes/notifications');
 const cron = require('node-cron');
 const db = require('./db');
 
@@ -63,6 +64,7 @@ app.use((req, res, next) => {
 app.use('/api/profile', profileRoutes);
 
 app.use('/api/subscription', subscriptionRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // ════════════════════════════════════════════════
 //  ROUTES
@@ -250,6 +252,21 @@ cron.schedule('0 0 1 * *', async () => {
     console.log(`✅ Billing complete for ${tenants.length} tenants — ${period}`);
   } catch (err) {
     console.error('❌ Billing cron error:', err);
+  }
+});
+
+// Auto Check-Out Cron (runs every day at 23:59)
+cron.schedule('59 23 * * *', async () => {
+  console.log('⏰ Running daily auto check-out job...');
+  try {
+    const [result] = await db.query(
+      `UPDATE attendance 
+       SET clock_out = CONCAT(CURDATE(), ' 23:59:59') 
+       WHERE clock_out IS NULL AND date = CURDATE()`
+    );
+    console.log(`✅ Auto check-out complete. Updated ${result.affectedRows} users.`);
+  } catch (err) {
+    console.error('❌ Auto check-out cron error:', err);
   }
 });
 

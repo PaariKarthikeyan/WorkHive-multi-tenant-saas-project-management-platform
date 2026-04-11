@@ -2,7 +2,18 @@ const express  = require('express');
 const router   = express.Router();
 const db       = require('../db');
 const bcrypt   = require('bcryptjs');
+const nodemailer = require('nodemailer');
 const authMiddleware = require('../middleware/auth');
+
+const transporter = nodemailer.createTransport({
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false,
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
 
 // All routes require authentication
 router.use(authMiddleware);
@@ -73,7 +84,7 @@ router.put('/', async (req, res) => {
 
 // ── PUT /api/profile/security ─── Update secondary email, phone, 2FA ──
 router.put('/security', async (req, res) => {
-  const { secondary_email, phone, two_factor_enabled } = req.body;
+  const { secondary_email, phone, two_factor_enabled, otp } = req.body;
   const { email: work_email } = req.user;
 
   if (secondary_email && secondary_email.toLowerCase() === work_email.toLowerCase()) {
@@ -87,6 +98,57 @@ router.put('/security', async (req, res) => {
   }
 
   try {
+    if (secondary_email) {
+      const [secInUse] = await db.query(
+        'SELECT user_id FROM users WHERE (email=? OR secondary_email=?) AND user_id != ?',
+        [secondary_email, secondary_email, req.user.user_id]
+      );
+      if (secInUse.length > 0) {
+        return res.status(400).json({ success: false, error: 'Secondary email is already in use by another account.' });
+      }
+    }
+
+    const [[user]] = await db.query('SELECT secondary_email, first_name FROM users WHERE user_id=?', [req.user.user_id]);
+    
+    // Check if changing an existing secondary email
+    const changingSecondary = user.secondary_email && secondary_email && secondary_email.toLowerCase() !== user.secondary_email.toLowerCase();
+    
+    if (changingSecondary) {
+      if (!otp) {
+        // Generate and send OTP
+        const newOtp = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiry = new Date(Date.now() + 10 * 60 * 1000);
+        await db.query('UPDATE users SET reset_token=?, reset_token_expiry=? WHERE user_id=?', [newOtp, expiry, req.user.user_id]);
+        
+        try {
+          await transporter.sendMail({
+            from: `"ProjexPM Security" <${process.env.EMAIL_USER}>`,
+            to: user.secondary_email,
+            subject: 'Security Update — Verify it\'s you',
+            html: `
+              <div style="font-family:sans-serif;max-width:480px;margin:auto">
+                <h2 style="color:#01696f">Security Update Request</h2>
+                <p>Hi ${user.first_name},</p>
+                <p>Someone is trying to change your secondary email. If this is you, enter this code:</p>
+                <div style="font-size:48px;font-weight:800;letter-spacing:12px;color:#01696f;padding:24px;text-align:center;background:#f3f0ec;border-radius:12px;">${newOtp}</div>
+              </div>
+            `
+          });
+        } catch (e) {
+          console.error('OTP email send failed:', e.message);
+        }
+        
+        return res.json({ success: true, requires_otp: true, message: 'OTP sent to your old secondary email.' });
+      } else {
+        // Verify OTP
+        const [[verify]] = await db.query('SELECT reset_token FROM users WHERE user_id=? AND reset_token=? AND reset_token_expiry > NOW()', [req.user.user_id, otp]);
+        if (!verify) {
+          return res.status(400).json({ success: false, error: 'Invalid or expired OTP.' });
+        }
+        await db.query('UPDATE users SET reset_token=NULL, reset_token_expiry=NULL WHERE user_id=?', [req.user.user_id]);
+      }
+    }
+
     await db.query(
       'UPDATE users SET secondary_email=?, phone=?, two_factor_enabled=? WHERE user_id=?',
       [secondary_email || null, phone || null, two_factor_enabled ? 1 : 0, req.user.user_id]

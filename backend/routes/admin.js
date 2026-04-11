@@ -69,6 +69,23 @@ router.post('/projects', async (req, res) => {
       [req.user.tenant_id, name, description || null, type || null,
       priority || 'medium', estimated_end_date || null, team_id || null]
     );
+
+    // Notification for Manager
+    if (team_id) {
+      const [[team]] = await db.query('SELECT manager_id, team_name FROM teams WHERE team_id = ?', [team_id]);
+      if (team && team.manager_id) {
+        await db.query(
+          `INSERT INTO notifications (user_id, type, title, message, data)
+           VALUES (?, 'new_project', 'New Project Assigned', ?, ?)`,
+          [
+            team.manager_id,
+            `Your team "${team.team_name}" has been assigned to a new project: "${name}".`,
+            JSON.stringify({ project_id: result.insertId })
+          ]
+        );
+      }
+    }
+
     res.status(201).json({ success: true, message: 'Project created.', data: { project_id: result.insertId } });
   } catch (err) {
     console.error(err);
@@ -543,6 +560,117 @@ router.get('/employees/attendance', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, error: 'Failed to fetch organization attendance.' });
+  }
+});
+
+// ── GET /api/admin/attendance/today ────────────────────────────────────────
+router.get('/attendance/today', async (req, res) => {
+  try {
+    const [[attendance]] = await db.query(
+      `SELECT * FROM attendance WHERE user_id=? AND date=CURDATE()`,
+      [req.user.user_id]
+    );
+    res.json({ success: true, data: attendance || null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to fetch attendance.' });
+  }
+});
+
+// ── GET /api/admin/attendance/history ──────────────────────────────────────
+router.get('/attendance/history', async (req, res) => {
+  try {
+    const [history] = await db.query(
+      `SELECT date, clock_in, clock_out, status FROM attendance WHERE user_id=? ORDER BY date DESC LIMIT 7`,
+      [req.user.user_id]
+    );
+    res.json({ success: true, data: history });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to fetch history.' });
+  }
+});
+
+// ── POST /api/admin/attendance/check-in ────────────────────────────────────
+router.post('/attendance/check-in', async (req, res) => {
+  try {
+    const [[existing]] = await db.query(
+      `SELECT clock_in FROM attendance WHERE user_id=? AND date=CURDATE()`,
+      [req.user.user_id]
+    );
+    if (existing) return res.status(400).json({ success: false, error: 'Already checked in today.' });
+
+    await db.query(
+      `INSERT INTO attendance (user_id, tenant_id, date, clock_in, status)
+       VALUES (?, ?, CURDATE(), NOW(), 'present')`,
+      [req.user.user_id, req.user.tenant_id]
+    );
+    res.json({ success: true, message: 'Checked in successfully.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to check in.' });
+  }
+});
+
+// ── PUT /api/admin/attendance/check-out ────────────────────────────────────
+router.put('/attendance/check-out', async (req, res) => {
+  try {
+    const [[attendance]] = await db.query(
+      `SELECT clock_in, clock_out FROM attendance WHERE user_id=? AND date=CURDATE()`,
+      [req.user.user_id]
+    );
+    if (!attendance) return res.status(400).json({ success: false, error: 'No check-in record found for today.' });
+    if (attendance.clock_out) return res.status(400).json({ success: false, error: 'Already checked out today.' });
+
+    await db.query(
+      `UPDATE attendance SET clock_out=NOW() WHERE user_id=? AND date=CURDATE()`,
+      [req.user.user_id]
+    );
+    res.json({ success: true, message: 'Checked out successfully.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to check out.' });
+  }
+});
+
+// ── DELETE /api/admin/attendance/today ─────────────────────────────────────
+router.delete('/attendance/today', async (req, res) => {
+  try {
+    const [result] = await db.query(
+      `DELETE FROM attendance WHERE user_id=? AND date=CURDATE() AND clock_out IS NULL`,
+      [req.user.user_id]
+    );
+    if (result.affectedRows === 0) return res.status(400).json({ success: false, error: 'Cannot undo.' });
+    res.json({ success: true, message: 'Check-in undone.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to undo check-in.' });
+  }
+});
+
+// ── PUT /api/admin/attendance/undo-check-out ───────────────────────────────
+router.put('/attendance/undo-check-out', async (req, res) => {
+  try {
+    const [result] = await db.query(
+      `UPDATE attendance SET clock_out=NULL WHERE user_id=? AND date=CURDATE()`,
+      [req.user.user_id]
+    );
+    if (result.affectedRows === 0) return res.status(400).json({ success: false, error: 'Cannot undo check-out.' });
+    res.json({ success: true, message: 'Checkout undone.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to undo check-out.' });
+  }
+});
+
+// ── GET /api/admin/tasks ─────────────────────────────────────────────────────
+router.get('/tasks', async (req, res) => {
+  try {
+    const [tasks] = await db.query(
+      `SELECT t.*, p.name as project_name
+       FROM tasks t
+       JOIN projects p ON t.project_id = p.project_id
+       WHERE p.tenant_id = ?`,
+      [req.user.tenant_id]
+    );
+    res.json({ success: true, data: tasks });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Failed to fetch tasks.' });
   }
 });
 

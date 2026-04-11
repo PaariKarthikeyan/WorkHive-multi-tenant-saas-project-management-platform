@@ -129,10 +129,23 @@ router.put('/tasks/:id/assign', async (req, res) => {
     }
 
     await db.query(
-      `UPDATE tasks SET assigned_to=?, status='in_progress'
+      `UPDATE tasks SET assigned_to=?
        WHERE task_id=? AND assigned_by=?`,
       [user_id, req.params.id, req.user.user_id]
     );
+
+    // Notification for Employee
+    const [[task]] = await db.query('SELECT name FROM tasks WHERE task_id = ?', [req.params.id]);
+    await db.query(
+      `INSERT INTO notifications (user_id, type, title, message, data)
+       VALUES (?, 'new_task', 'New Task Assigned', ?, ?)`,
+      [
+        user_id,
+        `You have been assigned a new task: "${task?.name || 'Untitled'}".`,
+        JSON.stringify({ task_id: req.params.id })
+      ]
+    );
+
     res.json({ success: true, message: 'Task assigned.' });
   } catch (err) {
     console.error(err);

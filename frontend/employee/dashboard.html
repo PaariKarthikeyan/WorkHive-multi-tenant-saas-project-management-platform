@@ -143,6 +143,24 @@
         border: 1px solid var(--bdr); color: var(--txtm);
       }
       .icon-btn:hover { background: var(--surfoff); }
+
+      /* ── Side Alerts/Notifications ── */
+      .notif-dot { position: relative; }
+      .notif-dot.active::after { content: ''; position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; background: var(--err); border-radius: 50%; border: 2px solid var(--surf); }
+
+      .notif-dropdown { position: absolute; top: calc(100% + 8px); right: 0; width: 320px; background: var(--surf); border: 1px solid var(--bdr); border-radius: var(--r-lg); box-shadow: var(--shlg); z-index: 1000; overflow: hidden; display: flex; flex-direction: column; max-height: 400px; }
+      .notif-head { padding: var(--sp3) var(--sp4); border-bottom: 1px solid var(--div); display: flex; align-items: center; justify-content: space-between; background: var(--surfoff); }
+      .notif-head h4 { font-size: var(--text-xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--txtm); }
+      .notif-list { overflow-y: auto; flex: 1; }
+      .notif-item { padding: var(--sp3) var(--sp4); border-bottom: 1px solid var(--div); cursor: pointer; transition: background 0.2s; display: flex; gap: var(--sp3); text-align: left; }
+      .notif-item:hover { background: var(--surfoff); }
+      .notif-item.unread { background: oklch(from var(--pr) l c h / 0.02); }
+      .notif-status { width: 8px; height: 8px; background: var(--pr); border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+      .notif-content { flex: 1; }
+      .notif-title { font-size: var(--text-sm); font-weight: 600; color: var(--txt); margin-bottom: 2px; }
+      .notif-msg { font-size: var(--text-xs); color: var(--txtm); line-height: 1.4; }
+      .notif-time { font-size: 10px; color: var(--txtf); margin-top: var(--sp1); text-transform: uppercase; }
+      .notif-empty { padding: var(--sp8); text-align: center; color: var(--txtf); font-size: var(--text-xs); }
       .content { flex: 1; min-height: 0; overflow-y: auto; padding: var(--sp8); }
 
       /* KPI Cards */
@@ -526,11 +544,35 @@
           <h1 class="page-title" x-text="pageTitle"></h1>
           <span style="font-size:var(--text-xs);font-weight:600;background:var(--prhi);color:var(--pr);padding:2px 10px;border-radius:var(--r-full);white-space:nowrap" x-text="user?.org_name ?? ''"></span>
         </div>
-        <div class="topbar-right">
-          <button class="icon-btn" style="position:relative" aria-label="Notifications">
-            <i data-lucide="bell" style="width:16px;height:16px"></i>
-            <span x-show="pendingCount > 0" style="position:absolute;top:6px;right:6px;width:7px;height:7px;background:var(--err);border-radius:50%;border:2px solid var(--surf)"></span>
+        <div class="topbar-right" style="position: relative;">
+          <button class="icon-btn notif-dot" :class="{active: notifications.some(n => !n.is_read)}" @click="showNotifications = !showNotifications; if(showNotifications) $nextTick(() => lucide.createIcons())" aria-label="Notifications">
+            <i data-lucide="bell" style="width: 16px; height: 16px"></i>
           </button>
+          
+          <!-- Notifications Dropdown -->
+          <div class="notif-dropdown" x-show="showNotifications" x-cloak @click.outside="showNotifications = false">
+            <div class="notif-head">
+              <h4>Notifications</h4>
+              <button class="btn-sm ghost" style="padding: 2px 6px; font-size: 10px;" @click="markAllAsRead()" :disabled="!notifications.some(n => !n.is_read)">Mark all read</button>
+            </div>
+            <div class="notif-list">
+              <template x-for="n in notifications" :key="n.id">
+                <div class="notif-item" :class="{unread: !n.is_read}" @click="markAsRead(n)">
+                  <div class="notif-status" x-show="!n.is_read"></div>
+                  <div class="notif-content">
+                    <div class="notif-title" x-text="n.title"></div>
+                    <div class="notif-msg" x-text="n.message"></div>
+                    <div class="notif-time" x-text="formatDate(n.created_at)"></div>
+                  </div>
+                </div>
+              </template>
+              <div x-show="notifications.length === 0" class="notif-empty">
+                <i data-lucide="bell-off" style="width: 24px; height: 24px; margin: 0 auto 8px; opacity: 0.5;"></i>
+                <p>No notifications yet</p>
+              </div>
+            </div>
+          </div>
+
           <button class="icon-btn" data-theme-toggle aria-label="Toggle theme">
             <i data-lucide="sun" style="width:16px;height:16px"></i>
           </button>
@@ -1150,6 +1192,8 @@
           queryError: '',
           submittingQuery: false,
           toasts: [],
+          notifications: [],
+          showNotifications: false,
           chatMessages: [],
           chatInput: '',
           suggestions: [],
@@ -1210,11 +1254,34 @@
           async init() {
             if (!getToken()) { location.href = '../login.html'; return; }
             await this.loadAll();
+            this.fetchNotifications();
             this.$nextTick(() => {
               lucide.createIcons();
               this.renderChart();
+              this.buildCalendar();
             });
           },
+
+          async fetchNotifications() {
+            const res = await api('/api/notifications');
+            if (res.success) this.notifications = res.data;
+          },
+
+          async markAsRead(notif) {
+            if (notif.is_read) return;
+            const res = await api(`/api/notifications/${notif.id}/read`, { method: 'PUT' });
+            if (res.success) {
+              notif.is_read = 1;
+            }
+          },
+
+          async markAllAsRead() {
+            const res = await api('/api/notifications/read-all', { method: 'PUT' });
+            if (res.success) {
+              this.notifications.forEach(n => n.is_read = 1);
+            }
+          },
+
 
           attendanceToday: null,
           attendanceHistory: [],
@@ -1404,10 +1471,16 @@
             const days = [];
             const events = [];
             (this.tasks || []).forEach((t, i) => {
-              if (t.due_date) {
-                const d = new Date(t.due_date);
+              if (t.deadline) {
+                const d = new Date(t.deadline);
                 const isPast = d < today && t.status !== 'completed';
-                events.push({ date: d, id: 't'+i, label: (isPast ? '🚨 ' : '📌 ') + (t.name || t.title), type: isPast ? 'deadline' : 'task' });
+                const isDone = t.status === 'completed';
+                events.push({ 
+                  date: d, 
+                  id: 't'+i, 
+                  label: (isDone ? '✅ ' : (isPast ? '🚨 ' : '📌 ')) + (t.name || t.title), 
+                  type: isDone ? 'sub' : (isPast ? 'deadline' : 'task') 
+                });
               }
             });
             for (let i = 0; i < firstDay; i++) {
